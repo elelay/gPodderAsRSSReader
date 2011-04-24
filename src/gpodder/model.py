@@ -27,7 +27,6 @@ import gpodder
 from gpodder import util
 from gpodder import feedcore
 from gpodder import youtube
-from gpodder import gstreamer
 
 from gpodder.liblogger import log
 
@@ -245,12 +244,27 @@ class PodcastChannel(PodcastModelObject):
         # Get most recent pubDate of all episodes
         last_pubdate = self.db.get_last_pubdate(self) or 0
 
+        # Keep track of episode GUIDs currently seen in the feed
+        seen_guids = set()
+
         # Search all entries for new episodes
         for entry in entries:
             try:
                 episode = PodcastEpisode.from_feedparser_entry(entry, self, mimetype_prefs)
-                if episode is not None and not episode.title:
-                    episode.title, ext = os.path.splitext(os.path.basename(episode.url))
+                if episode is not None:
+                    if not episode.title:
+                        log('Using filename as title for episode at %s.', \
+                                episode.url, sender=self)
+                        basename = os.path.basename(episode.url)
+                        episode.title, ext = os.path.splitext(basename)
+
+                    # Maemo bug 12073
+                    if not episode.guid:
+                        log('Using download URL as GUID for episode %s.', \
+                                episode.title, sender=self)
+                        episode.guid = episode.url
+
+                    seen_guids.add(episode.guid)
             except Exception, e:
                 log('Cannot instantiate episode: %s. Skipping.', e, sender=self, traceback=True)
                 continue
@@ -286,7 +300,6 @@ class PodcastChannel(PodcastModelObject):
         # downloaded and that the feed does not list as downloadable anymore
         # don't do it if channel is locked
         if self.id is not None:
-            seen_guids = set(e.guid for e in feed.entries if hasattr(e, 'guid'))
             episodes_to_purge = (e for e in existing if \
                      ((not self.channel_is_locked and e.state != gpodder.STATE_DOWNLOADED) \
                          or e.state == gpodder.STATE_DELETED \
@@ -854,21 +867,6 @@ class PodcastEpisode(PodcastModelObject):
         self.is_played = False
         self.length = os.path.getsize(filename)
 
-        if not self.total_time:
-            try:
-                length = gstreamer.get_track_length(filename)
-                if length is not None:
-                    length = int(length/1000)
-                    log('Detected media length: %d seconds', length, \
-                            sender=self)
-                    self.total_time = length
-                    self.db.save_episode(self)
-                    self.db.commit()
-                    return
-            except Exception, e:
-                log('Error while detecting media length: %s', str(e), \
-                        sender=self)
-
         self.db.save_downloaded_episode(self)
         self.db.commit()
 
@@ -936,7 +934,7 @@ class PodcastEpisode(PodcastModelObject):
     def one_line_description(self):
         MAX_LINE_LENGTH = 120
         desc = util.remove_html_tags(self.description or '')
-        desc = re.sub('\n', ' ', desc).strip()
+        desc = re.sub('\s+', ' ', desc).strip()
         if not desc:
             return _('No description available')
         else:
