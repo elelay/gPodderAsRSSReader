@@ -41,6 +41,7 @@ class TextExtents(object):
 
 RRECT_LEFT_SIDE = 1
 RRECT_RIGHT_SIDE = 2
+RRECT_MIDDLE_SIDE = 4
 
 def draw_rounded_rectangle(ctx, x, y, w, h, r=10, left_side_width = None, sides_to_draw=0, close=False):
     assert left_side_width is not None
@@ -55,6 +56,14 @@ def draw_rounded_rectangle(ctx, x, y, w, h, r=10, left_side_width = None, sides_
         ctx.curve_to(x, y+h, x, y+h, x, y+h-r)
         ctx.line_to(x, y+r)
         ctx.curve_to(x, y, x, y, x+r, y)
+        ctx.line_to(x+int(left_side_width)-offset, y)
+        if close:
+            ctx.line_to(x+int(left_side_width)-offset, y+h)
+
+    if sides_to_draw & RRECT_MIDDLE_SIDE:
+        ctx.move_to(x+int(left_side_width)-offset, y+h)
+        ctx.line_to(x, y+h)
+        ctx.line_to(x, y)
         ctx.line_to(x+int(left_side_width)-offset, y)
         if close:
             ctx.line_to(x+int(left_side_width)-offset, y+h)
@@ -117,7 +126,7 @@ def draw_text_box_centered(ctx, widget, w_width, w_height, text, font_desc=None,
         ctx.fill()
 
 
-def draw_text_pill(left_text, right_text, x=0, y=0, border=2, radius=14, font_desc=None):
+def draw_text_pill(left_text, middle_text, right_text, x=0, y=0, border=2, radius=14, font_desc=None):
     if gpodder.ui.fremantle:
         border += 3
     # Create temporary context to calculate the text size
@@ -137,34 +146,70 @@ def draw_text_pill(left_text, right_text, x=0, y=0, border=2, radius=14, font_de
     layout_left = pango.Layout(pango_context)
     layout_left.set_font_description(font_desc)
     layout_left.set_text(left_text)
+    layout_middle = pango.Layout(pango_context)
+    layout_middle.set_font_description(font_desc)
+    layout_middle.set_text(middle_text)
     layout_right = pango.Layout(pango_context)
     layout_right.set_font_description(font_desc)
     layout_right.set_text(right_text)
 
     width_left, height_left = layout_left.get_pixel_size()
+    width_middle, height_middle = layout_middle.get_pixel_size()
     width_right, height_right = layout_right.get_pixel_size()
 
-    text_height = max(height_left, height_right)
+    text_height = max(height_left, height_middle, height_right)
 
     image_height = int(y+text_height+border*2)
-    image_width = int(x+width_left+width_right+x_border*4)
+    image_width = int(x+width_left+width_middle+width_right+x_border*6)
     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, image_width, image_height)
 
     ctx = pangocairo.CairoContext(cairo.Context(surface))
 
     if left_text == '0':
         left_text = None
+    if middle_text == '0':
+        middle_text = None
     if right_text == '0':
         right_text = None
 
     left_side_width = width_left + x_border*2
+    middle_side_width = width_middle + x_border*2
     right_side_width = width_right + x_border*2
 
-    rect_width = left_side_width + right_side_width
+    rect_width = left_side_width + middle_side_width + right_side_width
     rect_height = text_height + border*2
     if left_text is not None:
-        draw_rounded_rectangle(ctx,x,y,rect_width,rect_height,radius, left_side_width, RRECT_LEFT_SIDE, right_text is None)
+        draw_rounded_rectangle(ctx,x,y,rect_width,rect_height,radius, left_side_width, RRECT_LEFT_SIDE, right_text is None and middle_text is None)
         linear = cairo.LinearGradient(x, y, x+left_side_width/2, y+rect_height/2)
+        linear.add_color_stop_rgba(0, 1, 1, .1, .5)
+        linear.add_color_stop_rgba(.4, 1, 1, .1, .7)
+        linear.add_color_stop_rgba(.6, 1, 1, .1, .6)
+        linear.add_color_stop_rgba(.9, 1, 1, .1, .8)
+        linear.add_color_stop_rgba(1, 1, 1, .1, .9)
+        ctx.set_source(linear)
+        ctx.fill()
+        xpos, ypos, width_left, height = x+1, y+1, left_side_width, rect_height-2
+        if right_text is None and middle_text is None:
+            width_left -= 2
+        draw_rounded_rectangle(ctx, xpos, ypos, rect_width, height, radius, width_left, RRECT_LEFT_SIDE, right_text is None and middle_text is None)
+        ctx.set_source_rgba(1., 1., 1., .3)
+        ctx.set_line_width(1)
+        ctx.stroke()
+        draw_rounded_rectangle(ctx,x,y,rect_width,rect_height,radius, left_side_width, RRECT_LEFT_SIDE, right_text is None and middle_text is None)
+        ctx.set_source_rgba(.2, .2, .2, .6)
+        ctx.set_line_width(1)
+        ctx.stroke()
+
+        # ctx.move_to(x+x_border, y+1+border)
+        # ctx.set_source_rgba( 0, 0, 0, 1)
+        # ctx.show_layout(layout_left)
+        ctx.move_to(x+x_border, y+border)
+        ctx.set_source_rgba( 0, 0, 0, 1)
+        ctx.show_layout(layout_left)
+
+    if middle_text is not None:
+        draw_rounded_rectangle(ctx,x+left_side_width,y,middle_side_width,rect_height,0, left_side_width, RRECT_MIDDLE_SIDE, right_text is None)
+        linear = cairo.LinearGradient(x+left_side_width, y, x+left_side_width+middle_side_width/2, y+rect_height/2)
         linear.add_color_stop_rgba(0, .8, .8, .8, .5)
         linear.add_color_stop_rgba(.4, .8, .8, .8, .7)
         linear.add_color_stop_rgba(.6, .8, .8, .8, .6)
@@ -172,28 +217,28 @@ def draw_text_pill(left_text, right_text, x=0, y=0, border=2, radius=14, font_de
         linear.add_color_stop_rgba(1, .8, .8, .8, .9)
         ctx.set_source(linear)
         ctx.fill()
-        xpos, ypos, width_left, height = x+1, y+1, left_side_width, rect_height-2
-        if right_text is None:
-            width_left -= 2
-        draw_rounded_rectangle(ctx, xpos, ypos, rect_width, height, radius, width_left, RRECT_LEFT_SIDE, right_text is None)
+        xpos, ypos, width_left, height = x+left_side_width+1, y+1, middle_side_width, rect_height-2
+        # if right_text is None:
+        #     width_left -= 2
+        draw_rounded_rectangle(ctx, xpos, ypos, middle_side_width, height, 0, width_middle, RRECT_MIDDLE_SIDE, right_text is None)
         ctx.set_source_rgba(1., 1., 1., .3)
         ctx.set_line_width(1)
         ctx.stroke()
-        draw_rounded_rectangle(ctx,x,y,rect_width,rect_height,radius, left_side_width, RRECT_LEFT_SIDE, right_text is None)
+        draw_rounded_rectangle(ctx,x+left_side_width,y,middle_side_width,rect_height,0, middle_side_width, RRECT_MIDDLE_SIDE, right_text is None)
         ctx.set_source_rgba(.2, .2, .2, .6)
         ctx.set_line_width(1)
         ctx.stroke()
-
-        ctx.move_to(x+x_border, y+1+border)
+        
+        ctx.move_to(x+left_side_width+x_border, y+1+border)
         ctx.set_source_rgba( 0, 0, 0, 1)
-        ctx.show_layout(layout_left)
-        ctx.move_to(x-1+x_border, y+border)
+        ctx.show_layout(layout_middle)
+        ctx.move_to(x-1+left_side_width+x_border, y+border)
         ctx.set_source_rgba( 1, 1, 1, 1)
-        ctx.show_layout(layout_left)
+        ctx.show_layout(layout_middle)
 
     if right_text is not None:
-        draw_rounded_rectangle(ctx, x, y, rect_width, rect_height, radius, left_side_width, RRECT_RIGHT_SIDE, left_text is None)
-        linear = cairo.LinearGradient(x+left_side_width, y, x+left_side_width+right_side_width/2, y+rect_height)
+        draw_rounded_rectangle(ctx, x, y, rect_width, rect_height, radius, left_side_width+middle_side_width, RRECT_RIGHT_SIDE, left_text is None and middle_text is None)
+        linear = cairo.LinearGradient(x+left_side_width+middle_side_width, y, x+left_side_width+middle_side_width+right_side_width/2, y+rect_height)
         linear.add_color_stop_rgba(0, .2, .2, .2, .9)
         linear.add_color_stop_rgba(.4, .2, .2, .2, .8)
         linear.add_color_stop_rgba(.6, .2, .2, .2, .6)
@@ -202,29 +247,29 @@ def draw_text_pill(left_text, right_text, x=0, y=0, border=2, radius=14, font_de
         ctx.set_source(linear)
         ctx.fill()
         xpos, ypos, width, height = x, y+1, rect_width-1, rect_height-2
-        if left_text is None:
+        if left_text is None and middle_text is None:
             xpos, width = x+1, rect_width-2
-        draw_rounded_rectangle(ctx, xpos, ypos, width, height, radius, left_side_width, RRECT_RIGHT_SIDE, left_text is None)
+        draw_rounded_rectangle(ctx, xpos, ypos, width, height, radius, left_side_width+middle_side_width, RRECT_RIGHT_SIDE, left_text is None and middle_text is None)
         ctx.set_source_rgba(1., 1., 1., .3)
         ctx.set_line_width(1)
         ctx.stroke()
-        draw_rounded_rectangle(ctx, x, y, rect_width, rect_height, radius, left_side_width, RRECT_RIGHT_SIDE, left_text is None)
+        draw_rounded_rectangle(ctx, x, y, rect_width, rect_height, radius, left_side_width+middle_side_width, RRECT_RIGHT_SIDE, left_text is None and middle_text is None)
         ctx.set_source_rgba(.1, .1, .1, .6)
         ctx.set_line_width(1)
         ctx.stroke()
 
-        ctx.move_to(x+left_side_width+x_border, y+1+border)
+        ctx.move_to(x+left_side_width+x_border+middle_side_width, y+1+border)
         ctx.set_source_rgba( 0, 0, 0, 1)
         ctx.show_layout(layout_right)
-        ctx.move_to(x-1+left_side_width+x_border, y+border)
+        ctx.move_to(x-1+left_side_width+x_border+middle_side_width, y+border)
         ctx.set_source_rgba( 1, 1, 1, 1)
         ctx.show_layout(layout_right)
 
     return surface
 
 
-def draw_pill_pixbuf(left_text, right_text):
-    return cairo_surface_to_pixbuf(draw_text_pill(left_text, right_text))
+def draw_pill_pixbuf(left_text, middle_text, right_text):
+    return cairo_surface_to_pixbuf(draw_text_pill(left_text, middle_text, right_text))
 
 
 def cairo_surface_to_pixbuf(s):

@@ -229,6 +229,10 @@ class EpisodeListModel(gtk.ListStore):
                     generate_thumbnails, reload_from_db=False)
 
         self._on_filter_changed(self.has_episodes())
+        log("updated model")
+        def hello():
+        	log("idle again")
+        gtk.idle_add(hello)
 
     def update_all(self, downloading=None, include_description=False, \
             generate_thumbnails=False):
@@ -687,9 +691,9 @@ class PodcastListModel(gtk.ListStore):
 
         return pixbuf_overlay
 
-    def _get_pill_image(self, channel, count_downloaded, count_unplayed):
-        if count_unplayed > 0 or count_downloaded > 0:
-            return draw.draw_pill_pixbuf(str(count_unplayed), str(count_downloaded))
+    def _get_pill_image(self, channel, count_downloaded, count_unplayed, count_new):
+        if count_unplayed > 0 or count_downloaded > 0 or count_new > 0 :
+            return draw.draw_pill_pixbuf(str(count_new), str(count_unplayed), str(count_downloaded))
         else:
             return None
 
@@ -792,7 +796,7 @@ class PodcastListModel(gtk.ListStore):
             # We don't display the pill, so don't generate it
             pill_image = None
         else:
-            pill_image = self._get_pill_image(channel, downloaded, unplayed)
+            pill_image = self._get_pill_image(channel, downloaded, unplayed, new)
 
         self.set(iter, \
                 self.C_TITLE, channel.title, \

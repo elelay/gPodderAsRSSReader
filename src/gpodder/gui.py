@@ -17,6 +17,22 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+SHOWNOTES_HTML_TEMPLATE = """
+<html>
+  <head>
+    <meta http-equiv="content-type" content="text/html; charset=utf-8"/>
+  </head>
+  <body>
+    <a href="%s" style="color:black;font-size: big; font-weight: bold;">%s</a>
+    <br>
+    <span style="font-size: small;">%s</span>
+    <hr style="border: 1px #eeeeee solid;">
+    <p>%s</p>
+  </body>
+</html>
+"""
+
+
 import os
 import platform
 import gtk
@@ -588,6 +604,218 @@ class gPodder(BuilderWidget, dbus.service.Object):
         # First-time users should be asked if they want to see the OPML
         if not self.channels and not gpodder.ui.fremantle:
             util.idle_add(self.on_itemUpdate_activate)
+        
+        # initialise the html notes
+        self._read_timer_source_id = None
+        
+        # initialise text view
+        self.textview.modify_bg(gtk.STATE_NORMAL, gtk.gdk.color_parse('#ffffff'))
+        self.hovering_over_link = False
+        self.hand_cursor = gtk.gdk.Cursor(gtk.gdk.HAND2)
+        self.regular_cursor = gtk.gdk.Cursor(gtk.gdk.XTERM)
+
+        if self.config.enable_html_shownotes:
+            try:
+                import webkit
+                webview_signals = gobject.signal_list_names(webkit.WebView)
+                if 'navigation-policy-decision-requested' in webview_signals:
+                    setattr(self, 'have_webkit', True)
+                    setattr(self, 'htmlview', webkit.WebView())
+                else:
+                    log('Your WebKit is too old (see bug 1001).', sender=self)
+                    setattr(self, 'have_webkit', False)
+
+                def navigation_policy_decision(wv, fr, req, action, decision):
+                    REASON_LINK_CLICKED, REASON_OTHER = 0, 5
+                    if action.get_reason() == REASON_LINK_CLICKED:
+                        util.open_website(req.get_uri())
+                        decision.ignore()
+                    elif action.get_reason() == REASON_OTHER:
+                        decision.use()
+                    else:
+                        decision.ignore()
+
+                self.htmlview.connect('navigation-policy-decision-requested', \
+                        navigation_policy_decision)
+
+                self.scrolled_window.remove(self.scrolled_window.get_child())
+                self.scrolled_window.add(self.htmlview)
+                self.textview = None
+                self.htmlview.load_html_string('', '')
+                self.htmlview.show()
+            except ImportError:
+                setattr(self, 'have_webkit', False)
+        else:
+            setattr(self, 'have_webkit', False)
+
+
+   # Links can be activated by pressing Enter.
+    def on_textview_key_press_event(self, text_view, event):
+        if (event.keyval == gtk.keysyms.Return or
+            event.keyval == gtk.keysyms.KP_Enter):
+            buffer = text_view.get_buffer()
+            iter = buffer.get_iter_at_mark(buffer.get_insert())
+            self.textview_follow_if_link(iter)
+        return False
+
+    # Links can also be activated by clicking.
+    def on_textview_event_after(self, text_view, event):
+        if event.type != gtk.gdk.BUTTON_RELEASE:
+            return False
+        if event.button != 1:
+            return False
+        buffer = text_view.get_buffer()
+
+        # we shouldn't follow a link if the user has selected something
+        try:
+            start, end = buffer.get_selection_bounds()
+        except ValueError:
+            # If there is nothing selected, None is return
+            pass
+        else:
+            if start.get_offset() != end.get_offset():
+                return False
+
+        x, y = text_view.window_to_buffer_coords(gtk.TEXT_WINDOW_WIDGET,
+            int(event.x), int(event.y))
+        iter = text_view.get_iter_at_location(x, y)
+
+        self.textview_follow_if_link(iter)
+        return False
+
+
+    # Looks at all tags covering the position (x, y) in the text view,
+    # and if one of them is a link, change the cursor to the "hands" cursor
+    # typically used by web browsers.
+    def textview_set_cursor_if_appropriate(self, text_view, x, y):
+        hovering = False
+
+        buffer = text_view.get_buffer()
+        iter = text_view.get_iter_at_location(x, y)
+
+        tags = iter.get_tags()
+        for tag in tags:
+            page = tag.get_data("page")
+            if page is not None:
+                hovering = True
+                break
+                
+        if hovering != self.hovering_over_link:
+            self.hovering_over_link = hovering
+
+        if self.hovering_over_link:
+            text_view.get_window(gtk.TEXT_WINDOW_TEXT).set_cursor(self.hand_cursor)
+        else:
+            text_view.get_window(gtk.TEXT_WINDOW_TEXT).set_cursor(self.regular_cursor)
+
+    # Update the cursor image if the pointer moved.
+    def on_textview_motion_notify_event(self, text_view, event):
+        x, y = text_view.window_to_buffer_coords(gtk.TEXT_WINDOW_WIDGET,
+            int(event.x), int(event.y))
+        self.textview_set_cursor_if_appropriate(text_view, x, y)
+        text_view.window.get_pointer()
+        return False
+
+    # Also update the cursor image if the window becomes visible
+    # (e.g. when a window covering it got iconified).
+    def on_textview_visibility_notify_event(self, text_view, event):
+        wx, wy, mod = text_view.window.get_pointer()
+        bx, by = text_view.window_to_buffer_coords(gtk.TEXT_WINDOW_WIDGET, wx, wy)
+
+        self.textview_set_cursor_if_appropriate(text_view, bx, by)
+        return False
+
+    def textview_insert_link(self, buffer, iter, text, page):
+        ''' Inserts a piece of text into the buffer, giving it the usual
+            appearance of a hyperlink in a web browser: blue and underlined.
+            Additionally, attaches some data on the tag, to make it recognizable
+            as a link.
+        '''
+        tag = buffer.create_tag(None,
+            foreground="blue", underline=pango.UNDERLINE_SINGLE)
+        tag.set_data("page", page)
+        buffer.insert_with_tags(iter, text, tag)
+
+    def textview_follow_if_link(self, iter):
+        ''' Looks at all tags covering the position of iter in the text view,
+            and if one of them is a link, follow it by showing the page identified
+            by the data attached to it.
+        '''
+        tags = iter.get_tags()
+        for tag in tags:
+            page = tag.get_data("page")
+            if page is not None:
+                util.open_website(page)
+                break
+
+    def display_embedded_notes(self,episode):
+        self.pre_display_notes()
+        # breaks selection...
+        #while gtk.events_pending():
+        #  gtk.main_iteration(False)
+        
+        # Load the shownotes into the UI
+        self.clear_embedded_notes()
+        self.load_embedded_notes(episode)
+	
+    def pre_display_notes(self):
+        if self.have_webkit:
+            self.htmlview.load_html_string('<html><head></head><body><em>%s</em></body></html>' % _('Loading shownotes...'), '')
+        else:
+            self.b = gtk.TextBuffer()
+            self.textview.set_buffer(self.b)
+
+    def clear_embedded_notes(self):
+        if self.have_webkit:
+            self.htmlview.load_html_string('', '')
+        else:
+            self.textview.get_buffer().set_text('')
+        self.restart_read_timer(None)
+
+
+    def load_embedded_notes(self,episode):
+        if episode is None:
+            return
+        # Now do the stuff that takes a bit longer...
+        heading = episode.title
+        subheading = _('from %s') % (episode.channel.title)
+        description = episode.description
+
+        if self.have_webkit:
+            global SHOWNOTES_HTML_TEMPLATE
+
+            # Get the description - if it looks like plaintext, replace the
+            # newline characters with line breaks for the HTML view
+            description = episode.description
+            if '<' not in description:
+                description = description.replace('\n', '<br>')
+
+            args = (
+                    episode.link,
+                    saxutils.escape(heading),
+                    saxutils.escape(subheading),
+                    description
+            )
+            url = os.path.dirname(episode.channel.url)
+            self.htmlview.load_html_string(SHOWNOTES_HTML_TEMPLATE % args, url)
+        else:
+            tag = self.b.create_tag('heading', scale=pango.SCALE_LARGE, \
+                  weight=pango.WEIGHT_BOLD, underline=pango.UNDERLINE_SINGLE)
+            tag.set_data('page',episode.link)
+            
+            self.b.create_tag('subheading', scale=pango.SCALE_SMALL)
+
+            self.b.insert_with_tags_by_name(self.b.get_end_iter(), heading, 'heading')
+            self.b.insert_at_cursor('\n')
+            self.b.insert_with_tags_by_name(self.b.get_end_iter(), subheading, 'subheading')
+            self.b.insert_at_cursor('\n\n')
+            self.b.insert(self.b.get_end_iter(), util.remove_html_tags(description))
+            self.b.place_cursor(self.b.get_start_iter())
+        self.restart_read_timer(episode)
+        
+    def on_visit_website_button_clicked(self, widget=None):
+        if self.episode and self.episode.link:
+            util.open_website(self.episode.link)
 
     def episode_object_by_uri(self, uri):
         """Get an episode object given a local or remote URI
@@ -950,6 +1178,16 @@ class gPodder(BuilderWidget, dbus.service.Object):
 
         self.treeChannels.set_model(self.podcast_list_model.get_filtered_model())
 
+        iter = self.treeChannels.get_model().get_iter_root()
+        if iter != None:
+            iter = self.treeChannels.get_model().iter_next(iter)
+            if iter != None:
+                self.treeChannels.get_selection().select_iter(iter)
+            else:
+                print "None 2nd line"
+        else:
+            print "None 1st line"
+
         # When no podcast is selected, clear the episode list model
         selection = self.treeChannels.get_selection()
         selection.connect('changed', self.on_treeview_podcasts_selection_changed)
@@ -976,8 +1214,8 @@ class gPodder(BuilderWidget, dbus.service.Object):
         # Enable separators to the podcast list to separate special podcasts
         # from others (this is used for the "all episodes" view)
         self.treeChannels.set_row_separator_func(PodcastListModel.row_separator_func)
-
         TreeViewHelper.set(self.treeChannels, TreeViewHelper.ROLE_PODCASTS)
+
 
     def on_entry_search_episodes_changed(self, editable):
         if self.hbox_search_episodes.get_property('visible'):
@@ -1133,6 +1371,8 @@ class gPodder(BuilderWidget, dbus.service.Object):
             selection.set_mode(gtk.SELECTION_MULTIPLE)
             # Update the sensitivity of the toolbar buttons on the Desktop
             selection.connect('changed', lambda s: self.play_or_download())
+            # show embedded notes
+            selection.connect('changed', self.on_treeAvailable_selection_changed)
 
         if gpodder.ui.diablo:
             # Set up the tap-and-hold context menu for podcasts
@@ -2052,20 +2292,20 @@ class gPodder(BuilderWidget, dbus.service.Object):
 
                 share_item.set_submenu(share_menu)
 
-            if (downloaded or one_is_new or can_download) and not downloading:
+            if not downloading:
                 menu.append(gtk.SeparatorMenuItem())
                 if one_is_new:
                     item = gtk.CheckMenuItem(_('New'))
                     item.set_active(True)
                     item.connect('activate', lambda w: self.mark_selected_episodes_old())
                     menu.append(self.set_finger_friendly(item))
-                elif can_download:
+                else:
                     item = gtk.CheckMenuItem(_('New'))
                     item.set_active(False)
                     item.connect('activate', lambda w: self.mark_selected_episodes_new())
                     menu.append(self.set_finger_friendly(item))
 
-                if downloaded:
+            if downloaded:
                     item = gtk.CheckMenuItem(_('Played'))
                     item.set_active(any_played)
                     item.connect( 'activate', lambda w: self.on_item_toggle_played_activate( w, False, not any_played))
@@ -2400,12 +2640,12 @@ class gPodder(BuilderWidget, dbus.service.Object):
                     is_played = episode.is_played
                     is_locked = episode.is_locked
                     if not can_play:
-                        can_download = True
+                        can_download = episode.url != ''
                 else:
                     if self.episode_is_downloading(episode):
                         can_cancel = True
                     else:
-                        can_download = True
+                        can_download = episode.url != ''
 
             can_download = can_download and not can_cancel
             can_play = self.streaming_possible() or (can_play and not can_cancel and not can_download)
@@ -2461,6 +2701,7 @@ class gPodder(BuilderWidget, dbus.service.Object):
         reloaded; i.e. something has been added or removed
         since the last update of the podcast list).
         """
+        
         selection = self.treeChannels.get_selection()
         model, iter = selection.get_selected()
 
@@ -2469,6 +2710,7 @@ class gPodder(BuilderWidget, dbus.service.Object):
             self.podcast_list_model.update_first_row()
 
         if selected:
+            print "selected"
             # very cheap! only update selected channel
             if iter is not None:
                 # If we have selected the "all episodes" view, we have
@@ -2481,6 +2723,7 @@ class gPodder(BuilderWidget, dbus.service.Object):
                     # Otherwise just update the selected row (a podcast)
                     self.podcast_list_model.update_by_filter_iter(iter)
         elif not self.channel_list_changed:
+            print "not channel_list_changed"
             # we can keep the model, but have to update some
             if urls is None:
                 # still cheaper than reloading the whole list
@@ -2489,6 +2732,7 @@ class gPodder(BuilderWidget, dbus.service.Object):
                 # ok, we got a bunch of urls to update
                 self.podcast_list_model.update_by_urls(urls)
         else:
+            print "channel_list_changed"
             if model and iter and select_url is None:
                 # Get the URL of the currently-selected podcast
                 select_url = model.get_value(iter, PodcastListModel.C_URL)
@@ -2511,6 +2755,7 @@ class gPodder(BuilderWidget, dbus.service.Object):
 
                 if not gpodder.ui.maemo:
                     if selected_iter is not None:
+                        print "selecting"
                         selection.select_iter(selected_iter)
                     self.on_treeChannels_cursor_changed(self.treeChannels)
             except:
@@ -2690,7 +2935,9 @@ class gPodder(BuilderWidget, dbus.service.Object):
                 for podcast in self.channels:
                     if podcast.url in worked:
                         episodes.extend(podcast.get_all_episodes())
-
+                
+                #omit episodes without downloads
+                episodes = [e for e in episodes if e.url != '']
                 if episodes:
                     episodes = list(PodcastEpisode.sort_by_pubdate(episodes, \
                             reverse=True))
@@ -2821,6 +3068,7 @@ class gPodder(BuilderWidget, dbus.service.Object):
 
 
     def update_feed_cache_finish_callback(self, updated_urls=None, select_url_afterwards=None):
+        print("update_feed_cache_finish_callback(%s,%s)" % (updated_urls,select_url_afterwards))
         self.db.commit()
         self.updating_feed_cache = False
 
@@ -2836,6 +3084,10 @@ class gPodder(BuilderWidget, dbus.service.Object):
         # updated, not in other podcasts (for single-feed updates)
         episodes = self.get_new_episodes([c for c in self.channels if c.url in updated_urls])
 
+        print("there are %i new episodes" % len(episodes))
+        #only consider episodes with downloads
+        episodes = [e for e in episodes if e.url != '']
+        
         if gpodder.ui.fremantle:
             self.fancy_progress_bar.hide()
             self.button_subscribe.set_sensitive(True)
@@ -2945,7 +3197,7 @@ class gPodder(BuilderWidget, dbus.service.Object):
 
     def update_feed_cache_proc(self, channels, select_url_afterwards):
         total = len(channels)
-
+        print("update_feed_cache_proc(%i)" % total)
         for updated, channel in enumerate(channels):
             if not self.feed_cache_update_cancelled:
                 try:
@@ -2976,6 +3228,7 @@ class gPodder(BuilderWidget, dbus.service.Object):
                 util.idle_add(update_progress)
 
         updated_urls = [c.url for c in channels]
+        print("updated urls %i" % len(updated_urls))
         util.idle_add(self.update_feed_cache_finish_callback, updated_urls, select_url_afterwards)
 
     def show_update_feeds_buttons(self):
@@ -3005,6 +3258,7 @@ class gPodder(BuilderWidget, dbus.service.Object):
             self.show_update_feeds_buttons()
 
     def update_feed_cache(self, channels=None, force_update=True, select_url_afterwards=None):
+        print("update_feed_cache(%i,%s,%s)" % (channels is not None,force_update,select_url_afterwards))
         if self.updating_feed_cache:
             if gpodder.ui.fremantle:
                 self.feed_cache_update_cancelled = True
@@ -3123,7 +3377,7 @@ class gPodder(BuilderWidget, dbus.service.Object):
         self.db.close()
 
         self.quit()
-        sys.exit(0)
+        #:sys.exit(0)
 
     def get_expired_episodes(self):
         for channel in self.channels:
@@ -3152,8 +3406,10 @@ class gPodder(BuilderWidget, dbus.service.Object):
         if not episodes:
             return False
 
+        download_episodes = [e for e in episodes if e.url != '']
+        
         if skip_locked:
-            episodes = [e for e in episodes if not e.is_locked]
+            episodes = [e for e in episodes if not e.is_locked or e.url == '']
 
             if not episodes:
                 title = _('Episodes are locked')
@@ -3168,8 +3424,10 @@ class gPodder(BuilderWidget, dbus.service.Object):
         if gpodder.ui.fremantle:
             message = '\n'.join([title, message])
 
-        if confirm and not self.show_confirmation(message, title):
-            return False
+        #ask for confirmation only if episodes contain downloaded files
+        if confirm and  download_episodes:
+            if not self.show_confirmation(message, title):
+                return False
 
         progress = ProgressIndicator(_('Deleting episodes'), \
                 _('Please wait while episodes are deleted'), \
@@ -3192,7 +3450,7 @@ class gPodder(BuilderWidget, dbus.service.Object):
             episodes_status_update = []
             for idx, episode in enumerate(episodes):
                 progress.on_progress(float(idx)/float(len(episodes)))
-                if episode.is_locked and skip_locked:
+                if episode.is_locked and episode.url != '' and skip_locked:
                     log('Not deleting episode (is locked): %s', episode.title)
                 else:
                     log('Deleting episode: %s', episode.title)
@@ -3448,6 +3706,7 @@ class gPodder(BuilderWidget, dbus.service.Object):
                 _config=self.config, \
                 show_notification=show_notification, \
                 show_episode_shownotes=self.show_episode_shownotes)
+        pass
 
     def on_itemDownloadAllNew_activate(self, widget, *args):
         if not self.offer_new_episodes():
@@ -3966,6 +4225,15 @@ class gPodder(BuilderWidget, dbus.service.Object):
         self.update_episode_list_icons([episode.url for episode in episodes])
         self.play_or_download()
 
+    def on_treeAvailable_selection_changed(self, widget):
+        """selection changed handler for treeAvailable"""
+        # Only display the first episode
+        if widget.count_selected_rows() == 0:
+            self.clear_embedded_notes()
+        else:
+            e = self.get_selected_episodes()[0]
+            self.display_embedded_notes(e)
+
     def on_treeAvailable_row_activated(self, widget, path, view_column):
         """Double-click/enter action handler for treeAvailable"""
         # We should only have one one selected as it was double clicked!
@@ -4031,6 +4299,36 @@ class gPodder(BuilderWidget, dbus.service.Object):
         self.mygpo_client.flush()
 
         return True
+
+
+    def restart_read_timer(self,episode):
+        if self._read_timer_source_id is not None:
+            log('Removing existing read timer.', sender=self)
+            gobject.source_remove(self._read_timer_source_id)
+            self._read_timer_source_id = None
+        
+        # was called only to clear timeout
+        if episode is None:
+            return
+        
+        if episode.url == '':
+            if episode.state == gpodder.STATE_NORMAL\
+                    and not episode.is_played:
+                print("new episode without enclosure, prepare mark as old")
+
+                def mark_old():
+                    print("marking %s as old" % episode.title)
+                    episode.mark_old()
+                    self.on_selected_episodes_status_changed()
+                    return False
+                
+                interval = 1000*2
+                log('Setting up mark read timer with interval %ds.', \
+                        interval, sender=self)
+                self._read_timer_source_id = gobject.timeout_add(\
+                        interval, mark_old)
+        else:
+            print("episode %s with enclosure %s" % (episode.title,episode.url))
 
     def on_treeDownloads_row_activated(self, widget, *args):
         # Use the standard way of working on the treeview

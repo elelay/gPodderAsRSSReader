@@ -181,11 +181,14 @@ class PodcastChannel(PodcastModelObject):
 
         self.save()
 
-        self.db.purge(max_episodes, self.id)
+        #use the channel_is_locked flag also to prevent purge
+        if not self.channel_is_locked:
+            self.db.purge(max_episodes, self.id)
 
     def _consume_updated_feed(self, feed, max_episodes=0, mimetype_prefs=''):
         self.parse_error = feed.get('bozo_exception', None)
-
+        log('consuming %s' % feed.feed.get('title'))
+        
         # Replace multi-space and newlines with single space (Maemo bug 11173)
         self.title = re.sub('\s+', ' ', feed.feed.get('title', self.url))
 
@@ -281,10 +284,13 @@ class PodcastChannel(PodcastModelObject):
 
         # Remove "unreachable" episodes - episodes that have not been
         # downloaded and that the feed does not list as downloadable anymore
+        # don't do it if channel is locked
         if self.id is not None:
             seen_guids = set(e.guid for e in feed.entries if hasattr(e, 'guid'))
             episodes_to_purge = (e for e in existing if \
-                    e.state != gpodder.STATE_DOWNLOADED and \
+                     ((not self.channel_is_locked and e.state != gpodder.STATE_DOWNLOADED) \
+                         or e.state == gpodder.STATE_DELETED \
+                      ) and \
                     e.guid not in seen_guids and e.guid is not None)
             for episode in episodes_to_purge:
                 log('Episode removed from feed: %s (%s)', episode.title, \
@@ -295,7 +301,8 @@ class PodcastChannel(PodcastModelObject):
         # max_episodes_per_feed items added to the feed between updates.
         # The benefit is that it prevents old episodes from apearing as new
         # in certain situations (see bug #340).
-        self.db.purge(max_episodes, self.id)
+        if not self.channel_is_locked:
+            self.db.purge(max_episodes, self.id)
 
     def update_channel_lock(self):
         self.db.update_channel_lock(self)
@@ -673,10 +680,11 @@ class PodcastEpisode(PodcastModelObject):
     @staticmethod
     def from_feedparser_entry(entry, channel, mimetype_prefs=''):
         episode = PodcastEpisode(channel)
-
+        #log("from_feedparser_entry(%s)" % entry.get('title',''))
         # Replace multi-space and newlines with single space (Maemo bug 11173)
         episode.title = re.sub('\s+', ' ', entry.get('title', ''))
         episode.link = entry.get('link', '')
+        #print("summary=%s" % entry.summary)
         if 'content' in entry and len(entry['content']) and \
                 entry['content'][0].get('type', '') == 'text/html':
             episode.description = entry['content'][0].value
@@ -693,7 +701,7 @@ class PodcastEpisode(PodcastModelObject):
         # Fallback to subtitle if summary is not available0
         if not episode.description:
             episode.description = entry.get('subtitle', '')
-
+        #print("episode %s description=%s" % (episode.title,episode.description))
         episode.guid = entry.get('id', '')
         if entry.get('updated_parsed', None):
             episode.pubDate = rfc822.mktime_tz(entry.updated_parsed+(0,))
@@ -792,8 +800,11 @@ class PodcastEpisode(PodcastModelObject):
             for match in mp3s.finditer(html):
                 episode.url = match.group(0)
                 return episode
-
-        return None
+               
+        #don't return None : for non-podcast channels
+        episode.state = gpodder.STATE_NORMAL
+        episode.url = ''
+        return episode
 
     def __init__(self, channel):
         self.db = channel.db
@@ -987,6 +998,8 @@ class PodcastEpisode(PodcastModelObject):
 
         The generated filename is stored in the database for future access.
         """
+        if self.url == '':
+            return None
         ext = self.extension(may_call_local_filename=False).encode('utf-8', 'ignore')
 
         # For compatibility with already-downloaded episodes, we
@@ -1087,6 +1100,8 @@ class PodcastEpisode(PodcastModelObject):
             self.db.commit()
 
     def extension(self, may_call_local_filename=True):
+        if self.url is None:
+            return None
         filename, ext = util.filename_from_url(self.url)
         if may_call_local_filename:
             filename = self.local_filename(create=False)
