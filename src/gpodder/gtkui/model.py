@@ -529,6 +529,51 @@ class PodcastChannelProxy(object):
     def update_save_dir_size(self):
         self.save_dir_size = util.calculate_size(self._config.download_dir)
 
+class NewPodcastChannelProxy(object):
+    # it's OK to be regarded as ALL_EPISODES_PROXY as well
+    ALL_EPISODES_PROXY = True
+
+    def __init__(self, db, config, channels):
+        self._db = db
+        self._config = config
+        self.channels = channels
+        self.title =  _('New episodes')
+        self.description = _('from all podcasts')
+        self.parse_error = ''
+        self.url = ''
+        self.id = None
+        self._save_dir_size_set = False
+        self.save_dir_size = 0L
+        self.cover_file = os.path.join(gpodder.images_folder, 'podcast-new.png')
+        self.feed_update_enabled = True
+        self.channel_is_locked = False
+
+    def __getattribute__(self, name):
+        try:
+            return object.__getattribute__(self, name)
+        except AttributeError:
+            log('Unsupported method call (%s)', name, sender=self)
+
+    def get_statistics(self):
+        # Get the total statistics for all channels from the database
+        total, deleted, new, downloaded, unplayed = self._db.get_total_count()
+        return (total,0,new,0,0)
+        
+
+    def get_all_episodes(self):
+        """Returns a generator that yields new episodes
+            from all channels
+        """
+        channel_lookup_map = dict((c.id, c) for c in self.channels)
+        return self._db.load_new_episodes(channel_lookup_map)
+
+    def request_save_dir_size(self):
+        if not self._save_dir_size_set:
+            self.update_save_dir_size()
+        self._save_dir_size_set = True
+
+    def update_save_dir_size(self):
+        self.save_dir_size = util.calculate_size(self._config.download_dir)
 
 class PodcastListModel(gtk.ListStore):
     C_URL, C_TITLE, C_DESCRIPTION, C_PILL, C_CHANNEL, \
@@ -733,6 +778,13 @@ class PodcastListModel(gtk.ListStore):
             iter = self.append(channel_to_row(all_episodes))
             self.update_by_iter(iter)
 
+        if config.podcast_list_view_new and channels:
+            new_episodes = NewPodcastChannelProxy(db, config, channels)
+            iter = self.append(channel_to_row(new_episodes))
+            self.update_by_iter(iter)
+
+        if (config.podcast_list_view_all
+            or config.podcast_list_view_new) and channels:
             # Separator item
             self.append(('', '', '', None, None, None, '', True, True, \
                     True, True, True, True, 0))
@@ -759,9 +811,14 @@ class PodcastListModel(gtk.ListStore):
                     return row.path
         return None
 
-    def update_first_row(self):
-        # Update the first row in the model (for "all episodes" updates)
-        self.update_by_iter(self.get_iter_first())
+    def update_channel_proxies(self, config):
+        # Update the first rows in the model (for "all/new episodes" updates)
+        if config.podcast_list_view_all \
+                or config.podcast_list_view_new:
+                    self.update_by_iter(self[0].iter)
+        if config.podcast_list_view_all \
+                and config.podcast_list_view_new:
+                    self.update_by_iter(self[1].iter)
 
     def update_by_urls(self, urls):
         # Given a list of URLs, update each matching row
@@ -769,10 +826,16 @@ class PodcastListModel(gtk.ListStore):
             if row[self.C_URL] in urls:
                 self.update_by_iter(row.iter)
 
-    def iter_is_first_row(self, iter):
+    def iter_is_proxy_row(self, config, iter):
         iter = self._filter.convert_iter_to_child_iter(iter)
         path = self.get_path(iter)
-        return (path == (0,))
+        return \
+            ((config.podcast_list_view_all
+                and config.podcast_list_view_new
+                and path == (1,))
+                or ( (config.podcast_list_view_all 
+                    or config.podcast_list_view_new)
+                     and path == (0,)))
 
     def update_by_filter_iter(self, iter):
         self.update_by_iter(self._filter.convert_iter_to_child_iter(iter))

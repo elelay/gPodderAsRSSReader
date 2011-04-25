@@ -218,6 +218,8 @@ gPodderSettings = {
       ('Hide podcasts in the main window for which the episode list is empty')),
     'podcast_list_view_all': (bool, True,
       ('Show an additional entry in the podcast list that contains all episodes')),
+    'podcast_list_view_new': (bool, True,
+      ('Show an additional entry in the podcast list that contains new episodes')),
 
     'rotation_mode': (int, 0,
       ('Internally used on Maemo 5 for the current rotation mode')),

@@ -389,6 +389,19 @@ class Database(object):
         self.lock.release()
         return result
 
+    def load_new_episodes(self, channel_mapping, limit=10000):
+        self.log('Loading new episodes from the database')
+        sql = 'SELECT * FROM %s WHERE state=? AND played=0 ORDER BY pubDate DESC LIMIT ?' % (self.TABLE_EPISODES,)
+        args = (gpodder.STATE_NORMAL,limit,)
+        cur = self.cursor(lock=True)
+        cur.execute(sql, args)
+        keys = [desc[0] for desc in cur.description]
+        id_index = keys.index('channel_id')
+        result = map(lambda row: channel_mapping[row[id_index]].episode_factory(dict(zip(keys, row))), cur)
+        cur.close()
+        self.lock.release()
+        return result
+
     def load_episodes(self, channel, factory=lambda x: x, limit=1000, state=None):
         assert channel.id is not None
 

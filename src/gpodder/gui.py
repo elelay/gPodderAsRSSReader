@@ -332,6 +332,7 @@ class gPodder(BuilderWidget, dbus.service.Object):
         if gpodder.ui.desktop:
             self.show_hide_tray_icon()
             self.itemShowAllEpisodes.set_active(self.config.podcast_list_view_all)
+            self.itemShowNewEpisodes.set_active(self.config.podcast_list_view_new)
             self.itemShowToolbar.set_active(self.config.show_toolbar)
             self.itemShowDescription.set_active(self.config.episode_list_descriptions)
 
@@ -1712,7 +1713,7 @@ class gPodder(BuilderWidget, dbus.service.Object):
             self._fremantle_rotation.set_mode(new_value)
         elif name in ('auto_update_feeds', 'auto_update_frequency'):
             self.restart_auto_update_timer()
-        elif name == 'podcast_list_view_all':
+        elif name == 'podcast_list_view_all' or name == 'podcast_list_view_new':
             # Force a update of the podcast list model
             self.channel_list_changed = True
             if gpodder.ui.fremantle:
@@ -2707,9 +2708,9 @@ class gPodder(BuilderWidget, dbus.service.Object):
         selection = self.treeChannels.get_selection()
         model, iter = selection.get_selected()
 
-        if self.config.podcast_list_view_all and not self.channel_list_changed:
+        if not self.channel_list_changed:
             # Update "all episodes" view in any case (if enabled)
-            self.podcast_list_model.update_first_row()
+            self.podcast_list_model.update_channel_proxies(self.config)
 
         if selected:
             print "selected"
@@ -2717,8 +2718,7 @@ class gPodder(BuilderWidget, dbus.service.Object):
             if iter is not None:
                 # If we have selected the "all episodes" view, we have
                 # to update all channels for selected episodes:
-                if self.config.podcast_list_view_all and \
-                        self.podcast_list_model.iter_is_first_row(iter):
+                if self.podcast_list_model.iter_is_proxy_row(self.config,iter):
                     urls = self.get_podcast_urls_from_selected_episodes()
                     self.podcast_list_model.update_by_urls(urls)
                 else:
@@ -3765,6 +3765,9 @@ class gPodder(BuilderWidget, dbus.service.Object):
 
     def on_itemShowAllEpisodes_activate(self, widget):
         self.config.podcast_list_view_all = widget.get_active()
+
+    def on_itemShowNewEpisodes_activate(self, widget):
+        self.config.podcast_list_view_new = widget.get_active()
 
     def on_itemShowToolbar_activate(self, widget):
         self.config.show_toolbar = self.itemShowToolbar.get_active()
