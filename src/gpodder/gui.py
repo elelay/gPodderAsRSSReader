@@ -48,6 +48,7 @@ import time
 import tempfile
 import collections
 import threading
+import Queue
 import urllib
 
 from xml.sax import saxutils
@@ -3086,7 +3087,9 @@ class gPodder(BuilderWidget, dbus.service.Object):
         # updated, not in other podcasts (for single-feed updates)
         episodes = self.get_new_episodes([c for c in self.channels if c.url in updated_urls])
 
-        print("there are %i new episodes" % len(episodes))
+        real_new_episode_count = len(episodes)
+        print("there are %i new episodes" % real_new_episode_count)
+        
         #only consider episodes with downloads
         episodes = [e for e in episodes if e.url != '']
         
@@ -3158,7 +3161,11 @@ class gPodder(BuilderWidget, dbus.service.Object):
         elif not episodes:
             # Nothing new here - but inform the user
             self.pbFeedUpdate.set_fraction(1.0)
-            self.pbFeedUpdate.set_text(_('No new episodes'))
+            if real_new_episode_count == 0:
+                self.pbFeedUpdate.set_text(_('No new episodes'))
+            else:
+                message = N_('%(count)d new episode available', '%(count)d new episodes available', real_new_episode_count) % {'count':real_new_episode_count}
+                self.pbFeedUpdate.set_text(message)
             self.feed_cache_update_cancelled = True
             self.btnCancelFeedUpdate.show()
             self.btnCancelFeedUpdate.set_sensitive(True)
@@ -3197,41 +3204,105 @@ class gPodder(BuilderWidget, dbus.service.Object):
         if channel is not None and not os.path.exists(channel.cover_file) and channel.image:
             self.cover_downloader.request_cover(channel)
 
+    def update_one_feed_cache_proc(self, queue,total):
+        """worker thread for updating feeds.
+            It will grab channels from the queue and
+            acknowledge them using Queue.task_done()
+            so that Queue.join() will succeed when the Queue
+            is empty and all the feeds are refreshed.
+            total is used to update the status
+        """
+        while not queue.empty():
+            try:
+                # get a channel to update
+                # get() will fail after 1s if the queue is empy
+                # (another thread stole the last channel since
+                # empty() was called).
+                # the Empty exception is caught at the end
+                channel = queue.get(True,1)
+                
+                # when update is cancelled, the channels are still
+                # dequeued to allow all threads to end
+                if not self.feed_cache_update_cancelled:
+                    try:
+                        channel.update(max_episodes=self.config.max_episodes_per_feed, \
+                                mimetype_prefs=self.config.mimetype_prefs)
+                        self._update_cover(channel)
+                    except Exception, e:
+                        d = {'url': saxutils.escape(channel.url), 'message': saxutils.escape(str(e))}
+                        if d['message']:
+                            message = _('Error while updating %(url)s: %(message)s')
+                        else:
+                            message = _('The feed at %(url)s could not be updated.')
+                        self.notification(message % d, _('Error while updating feed'), widget=self.treeChannels)
+                        log('Error: %s', str(e), sender=self, traceback=True)
+                
+                    # By the time we get here the update may have already been cancelled
+                    if not self.feed_cache_update_cancelled:
+                        log("Updated %s", channel.title, sender=self)
+                        
+                        # must keep track somehow of the number
+                        # of feeds already updated.
+                        # this is stored in self.update_feed_cache_count
+                        # and concurrent access is protected by
+                        # self.update_feed_cache_lock
+                        self.update_feed_cache_lock.acquire()
+                        updated = self.update_feed_cache_count + 1
+                        self.update_feed_cache_count = updated
+                        self.update_feed_cache_lock.release()
+                        
+                        # will update the ui later on
+                        self.update_feed_cache_status(updated,total,channel)
+                    
+                # notify main thread of completion of the task
+                # (even if feed_cache_update_cancelled)
+                queue.task_done()
+                    
+            except Queue.Empty:
+                pass
+            
+            log("Worker thread done: %s", threading.current_thread().name)
+        
+        
     def update_feed_cache_proc(self, channels, select_url_afterwards):
+        """update given channels in parallel.
+            will exit once all channels are updated or update is cancelled
+        """
         total = len(channels)
         print("update_feed_cache_proc(%i)" % total)
-        for updated, channel in enumerate(channels):
-            if not self.feed_cache_update_cancelled:
-                try:
-                    channel.update(max_episodes=self.config.max_episodes_per_feed, \
-                            mimetype_prefs=self.config.mimetype_prefs)
-                    self._update_cover(channel)
-                except Exception, e:
-                    d = {'url': saxutils.escape(channel.url), 'message': saxutils.escape(str(e))}
-                    if d['message']:
-                        message = _('Error while updating %(url)s: %(message)s')
-                    else:
-                        message = _('The feed at %(url)s could not be updated.')
-                    self.notification(message % d, _('Error while updating feed'), widget=self.treeChannels)
-                    log('Error: %s', str(e), sender=self, traceback=True)
-
-            if self.feed_cache_update_cancelled:
-                break
-
-            # By the time we get here the update may have already been cancelled
-            if not self.feed_cache_update_cancelled:
-                def update_progress():
-                    d = {'podcast': channel.title, 'position': updated+1, 'total': total}
-                    progression = _('Updated %(podcast)s (%(position)d/%(total)d)') % d
-                    self.pbFeedUpdate.set_text(progression)
-                    if self.tray_icon:
-                        self.tray_icon.set_status(self.tray_icon.STATUS_UPDATING_FEED_CACHE, progression)
-                    self.pbFeedUpdate.set_fraction(float(updated+1)/float(total))
-                util.idle_add(update_progress)
-
+        
+        self.update_feed_cache_lock = threading.Lock()
+        self.update_feed_cache_count = 0
+        
+        queue = Queue.Queue(len(channels))
+        
+        for channel in channels:
+            queue.put(channel)
+        
+        # 4 concurrent feed updates
+        for i in range(4):
+            args = (queue,total)
+            t = threading.Thread(target=self.update_one_feed_cache_proc, args=args)
+            t.start()
+            
+        # wait for all threads to be done
+        queue.join()
+        
         updated_urls = [c.url for c in channels]
-        print("updated urls %i" % len(updated_urls))
         util.idle_add(self.update_feed_cache_finish_callback, updated_urls, select_url_afterwards)
+
+    def update_feed_cache_status(self, updated, total, channel):
+        """ display some progress information ("updated XXX (N/total)")"""
+        # By the time we get here the update may have already been cancelled
+        if not self.feed_cache_update_cancelled:
+            def update_progress():
+                d = {'podcast': channel.title, 'position': updated+1, 'total': total}
+                progression = _('Updated %(podcast)s (%(position)d/%(total)d)') % d
+                self.pbFeedUpdate.set_text(progression)
+                if self.tray_icon:
+                    self.tray_icon.set_status(self.tray_icon.STATUS_UPDATING_FEED_CACHE, progression)
+                self.pbFeedUpdate.set_fraction(float(updated+1)/float(total))
+            util.idle_add(update_progress)
 
     def show_update_feeds_buttons(self):
         # Make sure that the buttons for updating feeds
